@@ -29,6 +29,8 @@ fn get_workspace_root() -> anyhow::Result<SystemPathBuf> {
 #[test]
 #[allow(clippy::print_stdout)]
 fn corpus_no_panic() -> anyhow::Result<()> {
+    let _logging = ruff_db::testing::setup_logging();
+
     let root = SystemPathBuf::from("/src");
 
     let system = TestSystem::default();

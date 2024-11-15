@@ -438,6 +438,9 @@ impl<'db> TypeInferenceBuilder<'db> {
             NodeWithScopeKind::FunctionTypeParameters(function) => {
                 self.infer_function_type_params(function.node());
             }
+            NodeWithScopeKind::TypeAliasTypeParameters(type_alias) => {
+                self.infer_type_alias_type_params(type_alias.node());
+            }
             NodeWithScopeKind::ListComprehension(comprehension) => {
                 self.infer_list_comprehension_expression_scope(comprehension.node());
             }
@@ -605,6 +608,9 @@ impl<'db> TypeInferenceBuilder<'db> {
                 self.infer_function_definition(function.node(), definition);
             }
             DefinitionKind::Class(class) => self.infer_class_definition(class.node(), definition),
+            DefinitionKind::TypeAlias(type_alias) => {
+                self.infer_type_alias_definition(type_alias.node(), definition);
+            }
             DefinitionKind::Import(import) => {
                 self.infer_import_definition(import.node(), definition);
             }
@@ -847,6 +853,17 @@ impl<'db> TypeInferenceBuilder<'db> {
         self.infer_parameters(&function.parameters);
     }
 
+    fn infer_type_alias_type_params(&mut self, type_alias: &ast::StmtTypeAlias) {
+        let _span = tracing::trace_span!("infer_type_alias_type_params").entered();
+        let type_params = type_alias
+            .type_params
+            .as_ref()
+            .expect("type alias type params scope without type params");
+
+        self.infer_type_parameters(type_params);
+        self.infer_annotation_expression(&type_alias.value, DeferredExpressionState::None);
+    }
+
     fn infer_function_body(&mut self, function: &ast::StmtFunctionDef) {
         self.infer_body(&function.body);
     }
@@ -893,8 +910,10 @@ impl<'db> TypeInferenceBuilder<'db> {
         }
     }
 
-    fn infer_definition(&mut self, node: impl Into<DefinitionNodeKey>) {
+    fn infer_definition(&mut self, node: impl Into<DefinitionNodeKey> + std::fmt::Debug) {
+        let _span = tracing::trace_span!("infer_definition", node=?node).entered();
         let definition = self.index.definition(node);
+        tracing::trace!(definition=?definition);
         let result = infer_definition_types(self.db, definition);
         self.extend(result);
     }
@@ -1105,6 +1124,31 @@ impl<'db> TypeInferenceBuilder<'db> {
         for base in class.bases() {
             self.infer_expression(base);
         }
+    }
+
+    fn infer_type_alias_definition(
+        &mut self,
+        type_alias: &ast::StmtTypeAlias,
+        definition: Definition<'db>,
+    ) {
+        let type_alias_ty = Type::Todo;
+        let _span =
+            tracing::trace_span!("infer_type_alias_definition", type_alias=?type_alias).entered();
+
+        self.infer_expression(&type_alias.name);
+        if let Some(ref type_params) = type_alias.type_params {
+            self.infer_type_parameters(type_params);
+        }
+
+        self.infer_annotation_expression(&type_alias.value, DeferredExpressionState::Deferred);
+
+        // TODO: _with_binding?
+        self.add_declaration_with_binding(
+            type_alias.into(),
+            definition,
+            type_alias_ty,
+            type_alias_ty,
+        );
     }
 
     fn infer_if_statement(&mut self, if_statement: &ast::StmtIf) {
@@ -1406,6 +1450,7 @@ impl<'db> TypeInferenceBuilder<'db> {
         node: &ast::TypeParamTypeVar,
         definition: Definition<'db>,
     ) {
+        let _span = tracing::trace_span!("infer_typevar_definition", node=?node).entered();
         let ast::TypeParamTypeVar {
             range: _,
             name,
@@ -1439,6 +1484,7 @@ impl<'db> TypeInferenceBuilder<'db> {
             )),
             None => None,
         };
+        tracing::trace!(bound_or_constraint=?bound_or_constraint);
         let default_ty = self.infer_optional_type_expression(default.as_deref());
         let ty = Type::KnownInstance(KnownInstanceType::TypeVar(TypeVarInstance::new(
             self.db,
@@ -1446,6 +1492,7 @@ impl<'db> TypeInferenceBuilder<'db> {
             bound_or_constraint,
             default_ty,
         )));
+        tracing::trace!(ty=?ty);
         self.add_declaration_with_binding(node.into(), definition, ty, ty);
     }
 
@@ -1828,17 +1875,9 @@ impl<'db> TypeInferenceBuilder<'db> {
         self.infer_augmented_op(assignment, target_type, value_type)
     }
 
-    fn infer_type_alias_statement(&mut self, type_alias_statement: &ast::StmtTypeAlias) {
-        let ast::StmtTypeAlias {
-            range: _,
-            name,
-            type_params: _,
-            value,
-        } = type_alias_statement;
-        self.infer_expression(value);
-        self.infer_expression(name);
-
-        // TODO: properly handle generic type aliases, which need their own annotation scope
+    fn infer_type_alias_statement(&mut self, node: &ast::StmtTypeAlias) {
+        let _span = tracing::trace_span!("infer_type_alias_statement", node=?node).entered();
+        self.infer_definition(node);
     }
 
     fn infer_for_statement(&mut self, for_statement: &ast::StmtFor) {
@@ -2779,6 +2818,7 @@ impl<'db> TypeInferenceBuilder<'db> {
 
     /// Infer the type of a [`ast::ExprName`] expression, assuming a load context.
     fn infer_name_load(&mut self, name: &ast::ExprName) -> Type<'db> {
+        let _span = tracing::trace_span!("infer_name_load", name = ?name).entered();
         let ast::ExprName {
             range: _,
             id,
@@ -4114,6 +4154,7 @@ impl<'db> TypeInferenceBuilder<'db> {
         annotation: &ast::Expr,
         deferred_state: DeferredExpressionState,
     ) -> Type<'db> {
+        let _span = tracing::trace_span!("infer_annotation_expression", ?annotation).entered();
         let previous_deferred_state = std::mem::replace(&mut self.deferred_state, deferred_state);
         let annotation_ty = self.infer_annotation_expression_impl(annotation);
         self.deferred_state = previous_deferred_state;
